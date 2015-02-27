@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <string name="app_name">jaavario</string>
+    <string name="pressureName">Pressure:</string>
+    <string name="heightName">Height:</string>
+    <string name="climbSinkRateName">Climb/Sink Rate:</string>
+    <string name="noiseLowerBound">Only make noise if sink rate is below:</string>
+    <string name="noiseUpperBound">Only make noise if climb rate is above:</string>
+    <string name="startName">start variometer</string>
+    <string name="stopName">stop variometer</string>
+
+</resources>
