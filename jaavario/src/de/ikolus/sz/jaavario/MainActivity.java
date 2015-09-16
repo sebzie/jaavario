@@ -18,10 +18,10 @@ import android.os.Looper;
 import android.os.Message;
 import android.util.Log;
 import android.view.View;
+import android.widget.Button;
 import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
-import android.widget.Button;
 
 public class MainActivity extends Activity {
 	

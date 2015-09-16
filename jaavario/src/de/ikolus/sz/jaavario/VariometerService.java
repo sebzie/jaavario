@@ -1,7 +1,12 @@
 package de.ikolus.sz.jaavario;
 
+import java.util.Date;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
+
+import de.ikolus.sz.jaavario.trackData.GPSLogger;
+import de.ikolus.sz.jaavario.trackData.IGCFileCreator;
+import de.ikolus.sz.jaavario.trackData.PressureLogger;
 
 import android.app.PendingIntent;
 import android.app.Service;
@@ -9,9 +14,12 @@ import android.content.Context;
 import android.content.Intent;
 import android.hardware.Sensor;
 import android.hardware.SensorManager;
+import android.location.LocationManager;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IBinder;
+import android.os.PowerManager;
+import android.os.PowerManager.WakeLock;
 import android.support.v4.app.NotificationCompat;
 import android.util.Log;
 
@@ -22,7 +30,16 @@ public class VariometerService extends Service {
 	
 	private Thread noiseThread;
 	
+	private HandlerThread GPSLocationHandlerThread;
+	private GPSLocationHandler GPSLocationHandler;
+	private LocationManager locMan;
+	
 	private final IBinder binderForServiceUser=new VariometerServiceBinder(this);
+	
+	private WakeLock wLock;
+	
+	private PressureLogger plogger=new PressureLogger();
+	private GPSLogger glogger=new GPSLogger();
 	
 	public void setValues(Handler uiHandler,float notificationSinkRate, float notificationClimbRate) {
 
@@ -35,8 +52,8 @@ public class VariometerService extends Service {
 			removeThreads();
 		}
 		
-		pressureSensorHandler=new PressureSensorHandler(uiHandler, lockForPressureBasedInformation, condition, pbinfo);
-		HandlerThread pressureHandlerThread=new HandlerThread("PressureSensorHandlerThread");
+		pressureSensorHandler=new PressureSensorHandler(uiHandler, lockForPressureBasedInformation, condition, pbinfo,plogger);
+		pressureHandlerThread=new HandlerThread("PressureSensorHandlerThread");
 		pressureHandlerThread.start();
 		Sensor pressureSens=((SensorManager) this.getSystemService(Context.SENSOR_SERVICE)).getDefaultSensor(Sensor.TYPE_PRESSURE);
 
@@ -47,7 +64,9 @@ public class VariometerService extends Service {
 		//ptest.parseAndCreateSignals("R5C25C35C45C55C65C75C85C80C80C80C80C80C80C80C60C40C30C30C30C30C30S15S15S15S15S20S30S30S30S30S30S30S30C40C40C40S30S30R10");
 		//ptest.parseAndCreateSignals("S20S20S20S20S20S20S20S20S20S20S20S20S20S20S20S20S20C50C50S20S20S20S20S20S20S20S20C60C99C99S20S20S20S20S20S20");
 		//ptest.parseAndCreateSignals("C10C10C10C10C10C10C10C10C10C10C10C10C10C10C10C10C10C10C10C10C10C10C10C10C10C10C10C10C10C10S10S10S10S10S10S10S10S10S10S10S10S10S10S10S10S10S10S10S10S10S10S10S10S10S10S10S10S10");
+		//ptest.parseAndCreateSignals("C10C10S15S15S15C10C10C10C10S15S15S15C10C10C10C10C10S15S15C10C10C10C10C10S45S15S15S15C10C10C10C10C10C10C10C10S15S15S15S35C10C10C10C10C10C10S15S10S10S10S15S10S10S10S10S15S10S10S10S10S10S10S10S15S10S10S10S10S15S10S10S10S10S10S10S10S10S15S10S10");
 		//comment the following line out for testing		
+		
 		senseman.registerListener(pressureSensorHandler, pressureSens, SensorManager.SENSOR_DELAY_FASTEST,new Handler(pressureHandlerThread.getLooper()));
 		 
 	    
@@ -56,6 +75,13 @@ public class VariometerService extends Service {
 	    noiseThread=new Thread(nht);
 	    //noiseThread.setUncaughtExceptionHandler(uncaughtExHandler);
 	    noiseThread.start();
+	    
+	    
+	    GPSLocationHandler=new GPSLocationHandler(glogger);
+	    GPSLocationHandlerThread=new HandlerThread("GPSLocationHandlerThread");
+	    GPSLocationHandlerThread.start();
+	    
+	    locMan.requestLocationUpdates(LocationManager.GPS_PROVIDER, 0, 0, GPSLocationHandler,GPSLocationHandlerThread.getLooper());
 		
 	}
 	
@@ -63,7 +89,12 @@ public class VariometerService extends Service {
 	public void onCreate() {
 		super.onCreate();
 		senseman=(SensorManager) this.getSystemService(Context.SENSOR_SERVICE);
+		locMan=(LocationManager) this.getSystemService(Context.LOCATION_SERVICE);
 		Log.d("service", "service onCreate");
+		
+		PowerManager powMan=(PowerManager)getSystemService(POWER_SERVICE);
+		wLock=powMan.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "jaavario-keepsensorsread");
+		wLock.acquire();
 		
 		NotificationCompat.Builder notificationBuilder=new NotificationCompat.Builder(this);
 		notificationBuilder.setSmallIcon(R.drawable.ic_notify_paraglider).setContentTitle("Variometer").setContentText("Variometer active");
@@ -128,8 +159,33 @@ public class VariometerService extends Service {
 			pressureHandlerThread=null;
 		}
 		
+		//save to access loggingData	
+		plogger.createLogFile("jaavario-"+new Date().getTime());		
+		
+		locMan.removeUpdates(GPSLocationHandler);
+		if(GPSLocationHandlerThread!=null) {
+			GPSLocationHandlerThread.quit();
+			GPSLocationHandlerThread=null;
+		}
+		
+		//save to access loggingData	
+		glogger.createLogFile("jaavarioGPS-"+new Date().getTime());
+		
+		
+		IGCFileCreator.createFile(plogger, glogger, "IGCFLIGHT"+new Date().getTime()+".igc");
+
+		//Logging Data can be released now
+		plogger=new PressureLogger();
+		glogger=new GPSLogger();
+		
+		
 		if(noiseThread!=null) {
 			noiseThread.interrupt();
+		}
+		
+		if(wLock!=null) {
+			wLock.release();
+			wLock=null;
 		}
 	}
 

@@ -1,7 +1,10 @@
 package de.ikolus.sz.jaavario;
 
+import java.util.Date;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
+
+import de.ikolus.sz.jaavario.trackData.PressureLogger;
 
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
@@ -9,6 +12,7 @@ import android.hardware.SensorEventListener;
 import android.os.Handler;
 import android.os.Message;
 import android.os.SystemClock;
+import android.util.Log;
 
 public class PressureSensorHandler implements SensorEventListener {
 
@@ -19,14 +23,16 @@ public class PressureSensorHandler implements SensorEventListener {
 	private Lock lockForPressureBasedInformation;
 	private Condition condForPbinfo;
 	private PressureBasedInformation pbinfo;
+	private PressureLogger plogger;
 	
 	private float testPressure;
 	
-	public PressureSensorHandler(Handler uiHandler,Lock lockForPressureBasedInformation, Condition condition, PressureBasedInformation pbinfo) {
+	public PressureSensorHandler(Handler uiHandler,Lock lockForPressureBasedInformation, Condition condition, PressureBasedInformation pbinfo, PressureLogger plogger) {
 		this.uiHandler=uiHandler;
 		this.lockForPressureBasedInformation=lockForPressureBasedInformation;
 		this.condForPbinfo=condition;
 		this.pbinfo=pbinfo;
+		this.plogger=plogger;
 	}
 	
 	@Override
@@ -65,7 +71,7 @@ public class PressureSensorHandler implements SensorEventListener {
 			climbSinkRate=0;
 		}
 		
-		//Log.d("timing", ""+timeOfLastEvent+";"+value+" testPressure: "+testPressure+" climbSinkRate: "+climbSinkRate);
+		Log.d("timing", ""+timeOfLastEvent+";"+value+" testPressure: "+testPressure+" climbSinkRate: "+climbSinkRate);
 		
 		lastPressureReadings[3]=lastPressureReadings[2];
 		lastPressureReadings[2]=lastPressureReadings[1];
@@ -99,6 +105,7 @@ public class PressureSensorHandler implements SensorEventListener {
 				condForPbinfo.signalAll();
 				lockForPressureBasedInformation.unlock();
 			}
+			plogger.log(pressure, height, climbSinkRate, new Date().getTime());
 		}
 	}
 	
