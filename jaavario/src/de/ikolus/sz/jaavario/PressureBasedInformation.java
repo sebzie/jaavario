@@ -44,5 +44,4 @@ class PressureBasedInformation {
 	public void setClimbSinkRate(double climbSinkRate) {
 		this.climbSinkRate = climbSinkRate;
 	}
-	
 }

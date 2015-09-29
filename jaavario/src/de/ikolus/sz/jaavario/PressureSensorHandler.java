@@ -1,6 +1,7 @@
 package de.ikolus.sz.jaavario;
 
 import java.util.Date;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 
@@ -9,8 +10,10 @@ import de.ikolus.sz.jaavario.trackData.PressureLogger;
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
-import android.os.Handler;
+import android.os.Bundle;
 import android.os.Message;
+import android.os.Messenger;
+import android.os.RemoteException;
 import android.os.SystemClock;
 import android.util.Log;
 
@@ -19,16 +22,18 @@ public class PressureSensorHandler implements SensorEventListener {
 	private long timeOfLastEvent=0;
 	private float[] lastPressureReadings=new float[4];
 	private long[] lastPressureReadingsTime=new long[4];
-	private Handler uiHandler;
+	private Messenger uiMessenger;
 	private Lock lockForPressureBasedInformation;
 	private Condition condForPbinfo;
 	private PressureBasedInformation pbinfo;
 	private PressureLogger plogger;
+	private AtomicBoolean sendMessagesToUI;
 	
 	private float testPressure;
 	
-	public PressureSensorHandler(Handler uiHandler,Lock lockForPressureBasedInformation, Condition condition, PressureBasedInformation pbinfo, PressureLogger plogger) {
-		this.uiHandler=uiHandler;
+	public PressureSensorHandler(Messenger uiMessenger, AtomicBoolean sendMessagesToUI, Lock lockForPressureBasedInformation, Condition condition, PressureBasedInformation pbinfo, PressureLogger plogger) {
+		this.uiMessenger=uiMessenger;
+		this.sendMessagesToUI=sendMessagesToUI;
 		this.lockForPressureBasedInformation=lockForPressureBasedInformation;
 		this.condForPbinfo=condition;
 		this.pbinfo=pbinfo;
@@ -71,7 +76,7 @@ public class PressureSensorHandler implements SensorEventListener {
 			climbSinkRate=0;
 		}
 		
-		Log.d("timing", ""+timeOfLastEvent+";"+value+" testPressure: "+testPressure+" climbSinkRate: "+climbSinkRate);
+		//Log.d("timing", ""+timeOfLastEvent+";"+value+" testPressure: "+testPressure+" climbSinkRate: "+climbSinkRate);
 		
 		lastPressureReadings[3]=lastPressureReadings[2];
 		lastPressureReadings[2]=lastPressureReadings[1];
@@ -90,11 +95,20 @@ public class PressureSensorHandler implements SensorEventListener {
 	
 	private void doMessaging(float pressure, double height, double climbSinkRate, long validTime) {
 		//messaging to uithread
-		if(uiHandler!=null) {
-			PressureBasedInformation pbdata=new PressureBasedInformation();
-			pbdata.setAll(pressure, height, climbSinkRate, validTime);
-			Message toSend=uiHandler.obtainMessage(Constants.UI_MESSAGE_TYPE_COMPLEX, pbdata);
-			toSend.sendToTarget();
+		if(uiMessenger!=null && sendMessagesToUI.get()) {
+			Message toSend=Message.obtain();
+			toSend.what=Constants.UI_MESSAGE_TYPE_COMPLEX;
+			Bundle bundle=new Bundle(3);
+			bundle.putFloat(Constants.pressure, pressure);
+			bundle.putDouble(Constants.height, height);
+			bundle.putDouble(Constants.climbSinkRate, climbSinkRate);
+			toSend.setData(bundle);
+			
+			try {
+				uiMessenger.send(toSend);
+			} catch (RemoteException e) {
+				Log.e("communication", "could not send message!");
+			}
 		}
 		
 		//putting data into data structure that is read by noisemaker

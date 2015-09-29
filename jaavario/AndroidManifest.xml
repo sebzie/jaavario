@@ -31,7 +31,7 @@
             </intent-filter>
         </activity>
         
-        <service android:name=".VariometerService" android:exported="false"/>
+        <service android:name=".VariometerService" android:exported="false" android:process=":VariometerServiceProcess"/>
     </application>
 
 </manifest>

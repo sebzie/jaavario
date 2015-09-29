@@ -1,6 +1,7 @@
 package de.ikolus.sz.jaavario;
 
 import java.util.Date;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -18,7 +19,10 @@ import android.location.LocationManager;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IBinder;
+import android.os.Message;
+import android.os.Messenger;
 import android.os.PowerManager;
+import android.os.RemoteException;
 import android.os.PowerManager.WakeLock;
 import android.support.v4.app.NotificationCompat;
 import android.util.Log;
@@ -34,25 +38,35 @@ public class VariometerService extends Service {
 	private GPSLocationHandler GPSLocationHandler;
 	private LocationManager locMan;
 	
-	private final IBinder binderForServiceUser=new VariometerServiceBinder(this);
-	
 	private WakeLock wLock;
+	
+	private ReentrantLock lockForPressureBasedInformation;
+	private Condition condition;
+	private PressureBasedInformation pbinfo;
+	
+	private float notificationSinkRate;
+	private float notificationClimbRate;
+	
 	
 	private PressureLogger plogger=new PressureLogger();
 	private GPSLogger glogger=new GPSLogger();
 	
-	public void setValues(Handler uiHandler,float notificationSinkRate, float notificationClimbRate) {
-
-		ReentrantLock lockForPressureBasedInformation=new ReentrantLock();
-		Condition condition=lockForPressureBasedInformation.newCondition();
-		PressureBasedInformation pbinfo=new PressureBasedInformation();		
-		
-		if(pressureSensorHandler!=null) { //the original activity is gone and a new activity was created
-			//-> recreate the threads with possibly new data - this is easier than making the threads updateable
-			removeThreads();
-		}
-		
-		pressureSensorHandler=new PressureSensorHandler(uiHandler, lockForPressureBasedInformation, condition, pbinfo,plogger);
+	private Messenger uiMessenger=null;
+	private AtomicBoolean sendMessagesToActivity=new AtomicBoolean(false);
+	
+	
+	//TODO: currently it is expected (but not enforced) that only one activity connects to this service
+	
+	private void createGPSHandlingThread() {
+	    GPSLocationHandler=new GPSLocationHandler(glogger);
+	    GPSLocationHandlerThread=new HandlerThread("GPSLocationHandlerThread");
+	    GPSLocationHandlerThread.start();
+	    
+	    locMan.requestLocationUpdates(LocationManager.GPS_PROVIDER, 0, 0, GPSLocationHandler,GPSLocationHandlerThread.getLooper());
+	}
+	
+	private void createPressureHandlingThread() {
+		pressureSensorHandler=new PressureSensorHandler(uiMessenger, sendMessagesToActivity, lockForPressureBasedInformation, condition, pbinfo,plogger);
 		pressureHandlerThread=new HandlerThread("PressureSensorHandlerThread");
 		pressureHandlerThread.start();
 		Sensor pressureSens=((SensorManager) this.getSystemService(Context.SENSOR_SERVICE)).getDefaultSensor(Sensor.TYPE_PRESSURE);
@@ -67,22 +81,36 @@ public class VariometerService extends Service {
 		//ptest.parseAndCreateSignals("C10C10S15S15S15C10C10C10C10S15S15S15C10C10C10C10C10S15S15C10C10C10C10C10S45S15S15S15C10C10C10C10C10C10C10C10S15S15S15S35C10C10C10C10C10C10S15S10S10S10S15S10S10S10S10S15S10S10S10S10S10S10S10S15S10S10S10S10S15S10S10S10S10S10S10S10S10S15S10S10");
 		//comment the following line out for testing		
 		
-		senseman.registerListener(pressureSensorHandler, pressureSens, SensorManager.SENSOR_DELAY_FASTEST,new Handler(pressureHandlerThread.getLooper()));
-		 
-	    
-	    
+		senseman.registerListener(pressureSensorHandler, pressureSens, SensorManager.SENSOR_DELAY_FASTEST,new Handler(pressureHandlerThread.getLooper()));		
+	}
+	
+	private void createNoiseHandlingThread() {
 	    NoiseHandlerThread nht=new NoiseHandlerThread(lockForPressureBasedInformation,condition,pbinfo,notificationSinkRate,notificationClimbRate);
 	    noiseThread=new Thread(nht);
-	    //noiseThread.setUncaughtExceptionHandler(uncaughtExHandler);
 	    noiseThread.start();
-	    
-	    
-	    GPSLocationHandler=new GPSLocationHandler(glogger);
-	    GPSLocationHandlerThread=new HandlerThread("GPSLocationHandlerThread");
-	    GPSLocationHandlerThread.start();
-	    
-	    locMan.requestLocationUpdates(LocationManager.GPS_PROVIDER, 0, 0, GPSLocationHandler,GPSLocationHandlerThread.getLooper());
-		
+	}
+	
+	private void removePressureHandlingThread() {
+		senseman.unregisterListener(pressureSensorHandler);
+		if(pressureHandlerThread!=null) {
+			pressureHandlerThread.quit();
+			pressureHandlerThread=null;
+		}
+	}
+	
+	private void removeGPSHandlingThread() {
+		locMan.removeUpdates(GPSLocationHandler);
+		if(GPSLocationHandlerThread!=null) {
+			GPSLocationHandlerThread.quit();
+			GPSLocationHandlerThread=null;
+		}
+	}
+	
+	private void removeNoiseHandlingThread() {
+		if(noiseThread!=null) {
+			noiseThread.interrupt();
+			//noiseThread.join();  //TODO?
+		}
 	}
 	
 	@Override
@@ -95,6 +123,11 @@ public class VariometerService extends Service {
 		PowerManager powMan=(PowerManager)getSystemService(POWER_SERVICE);
 		wLock=powMan.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "jaavario-keepsensorsread");
 		wLock.acquire();
+		
+		//initialize shared objects
+		lockForPressureBasedInformation=new ReentrantLock();
+		condition=lockForPressureBasedInformation.newCondition();
+		pbinfo=new PressureBasedInformation();	
 		
 		NotificationCompat.Builder notificationBuilder=new NotificationCompat.Builder(this);
 		notificationBuilder.setSmallIcon(R.drawable.ic_notify_paraglider).setContentTitle("Variometer").setContentText("Variometer active");
@@ -131,62 +164,106 @@ public class VariometerService extends Service {
 	@Override
 	public IBinder onBind(Intent intent) {
 		Log.d("service", "onBind");
-		return binderForServiceUser;
+		
+		if(uiMessenger!=null) {
+			Log.e("status", "things already seem to be running - but they should not!");
+		}
+		
+		if(intent.hasExtra(Constants.notificationClimbRate) && intent.hasExtra(Constants.notificationSinkRate) && intent.hasExtra(Constants.pressureReadingsReceiver)) {
+			uiMessenger=(Messenger) intent.getParcelableExtra(Constants.pressureReadingsReceiver);
+			notificationClimbRate=intent.getFloatExtra(Constants.notificationClimbRate, 1.5f);
+			notificationSinkRate=intent.getFloatExtra(Constants.notificationSinkRate, 1.5f);
+
+			createPressureHandlingThread();
+		    
+			createNoiseHandlingThread();
+
+		    createGPSHandlingThread();
+		    
+		    sendMessagesToActivity.set(true);
+		}
+		else {  //intent does not contain the relevant data!
+			Log.e("status", "intent incomplete!");
+		}
+
+		
+		return null;  //no binder object required
 	}
 	
 	@Override
 	public boolean onUnbind(Intent intent) {
 		Log.d("service", "onUnbind");
+		sendMessagesToActivity.set(false);
 		return true;
 	}
 	
 	@Override
-	public void onRebind(Intent intent) {
+	public void onRebind(Intent intent) {  //service is already running and has been set up
 		Log.d("service", "onRebind");
+		
+		if(intent.hasExtra(Constants.notificationClimbRate) && intent.hasExtra(Constants.notificationSinkRate) && intent.hasExtra(Constants.pressureReadingsReceiver)) {
+			Messenger mes=(Messenger) intent.getParcelableExtra(Constants.pressureReadingsReceiver);
+			float notiClimbRate=intent.getFloatExtra(Constants.notificationClimbRate, 1.5f);
+			float notiSinkRate=intent.getFloatExtra(Constants.notificationSinkRate, 1.5f);
+			
+			//recreate the threads with new data if there is new data -> this is easier than making the threads updateable
+			if(uiMessenger!=mes) {  //a different activity tries to connect
+				Log.d("threading", "Need to restart pressure thread");
+				removePressureHandlingThread();
+				uiMessenger=mes;
+				createPressureHandlingThread();
+			}
+			if(notificationSinkRate!=notiSinkRate || notificationClimbRate!=notiClimbRate) { //settings have been changed
+				Log.d("threading", "Need to restart noise thread");
+				removeNoiseHandlingThread();
+				notificationClimbRate=notiClimbRate;
+				notificationSinkRate=notiSinkRate;
+				createNoiseHandlingThread();
+			}
+			
+			sendMessagesToActivity.set(true);
+			
+		}
+		else {  //intent does not contain the relevant data!
+			Log.e("status", "intent incomplete!");
+		}
+		
 	}
 	
 	@Override
 	public void onDestroy() {
 		Log.d("service","in onDestroy");
-		removeThreads();
-		super.onDestroy();
-	}
-	
-	private void removeThreads() {
-		senseman.unregisterListener(pressureSensorHandler);
-		if(pressureHandlerThread!=null) {
-			pressureHandlerThread.quit();
-			pressureHandlerThread=null;
-		}
-		
-		//save to access loggingData	
-		plogger.createLogFile("jaavario-"+new Date().getTime());		
-		
-		locMan.removeUpdates(GPSLocationHandler);
-		if(GPSLocationHandlerThread!=null) {
-			GPSLocationHandlerThread.quit();
-			GPSLocationHandlerThread=null;
-		}
-		
-		//save to access loggingData	
-		glogger.createLogFile("jaavarioGPS-"+new Date().getTime());
-		
-		
-		IGCFileCreator.createFile(plogger, glogger, "IGCFLIGHT"+new Date().getTime()+".igc");
+		try {
+			Message message=Message.obtain();
+			message.what=Constants.UI_MESSAGE_TYPE_WAIT_FOR_LOGGING;
+			uiMessenger.send(message);
+			
+			removePressureHandlingThread();
+			//save to access pressure log
+			removeGPSHandlingThread();
+			//save to access gps log
 
-		//Logging Data can be released now
-		plogger=new PressureLogger();
-		glogger=new GPSLogger();
-		
-		
-		if(noiseThread!=null) {
-			noiseThread.interrupt();
+			plogger.createLogFile("jaavario-"+new Date().getTime());
+			glogger.createLogFile("jaavarioGPS-"+new Date().getTime());
+			IGCFileCreator.createFile(plogger, glogger, "IGCFLIGHT"+new Date().getTime()+".igc");
+			message=Message.obtain();
+			message.what=Constants.UI_MESSAGE_TYPE_STOP_WAITING_FOR_LOGGING;
+			uiMessenger.send(message);
+		} catch (RemoteException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
 		}
+		//Logging Data can be released now
 		
+		removeNoiseHandlingThread();
+
 		if(wLock!=null) {
 			wLock.release();
 			wLock=null;
 		}
+		
+		Log.d("service","raus onDestroy");
+		super.onDestroy();
 	}
 
 }

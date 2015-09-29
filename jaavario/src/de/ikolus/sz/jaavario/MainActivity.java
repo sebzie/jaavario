@@ -1,6 +1,7 @@
 package de.ikolus.sz.jaavario;
 
 import android.app.Activity;
+import android.app.ProgressDialog;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
@@ -16,6 +17,7 @@ import android.os.HandlerThread;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.Message;
+import android.os.Messenger;
 import android.util.Log;
 import android.view.View;
 import android.widget.Button;
@@ -39,12 +41,16 @@ public class MainActivity extends Activity {
 	private SeekBar upperBound;
 	private Button startButton;
 	
+	private ProgressDialog progDialogTrackBeingWritten;
+	
 	private SensorManager senseman;
 	private Sensor pressureSens;
 	
 	private HandlerThread simplePressureReader;
 	
-	private ServiceConnection varioServiceConnection;	
+	private Messenger variometerServiceMessenger=null;
+	private ServiceConnection varioServiceConnection;
+	
 	
 	//this method is called when the application cannot work e.g. the device has no appropriate sensors...
 	private void appIsBroken(String reason) {
@@ -81,7 +87,7 @@ public class MainActivity extends Activity {
 	}
 	
 	private void startUsingVariometerService() {
-		stopSimplePressureSensorReader(); //stop the simple pressure reader
+		stopSimplePressureSensorReader();
 		
 		lowerBound.setEnabled(false);
 		upperBound.setEnabled(false);
@@ -92,8 +98,22 @@ public class MainActivity extends Activity {
 		startService(new Intent(MainActivity.this, VariometerService.class));
 
 		varioActive=true;
-		varioBound=bindService(new Intent(MainActivity.this, VariometerService.class), varioServiceConnection, Context.BIND_AUTO_CREATE);
+		bindVariometerService();
+		
 		startButton.setText(R.string.stopName);
+	}
+	
+	private void bindVariometerService() {
+		final SharedPreferences sPrefs=this.getPreferences(Context.MODE_PRIVATE);
+		Intent startServiceIntent=new Intent(MainActivity.this, VariometerService.class);
+		if(variometerServiceMessenger==null) {
+			variometerServiceMessenger=new Messenger(uiValueUpdateHandler);
+		}
+		startServiceIntent.putExtra(Constants.pressureReadingsReceiver, variometerServiceMessenger);
+		startServiceIntent.putExtra(Constants.notificationSinkRate, sPrefs.getInt(Constants.lowerBoundPreferenceKey, 10)*-0.1f-0.5f);
+		startServiceIntent.putExtra(Constants.notificationClimbRate, sPrefs.getInt(Constants.upperBoundPreferenceKey, 10)*0.1f+0.5f);
+		
+		varioBound=bindService(startServiceIntent, varioServiceConnection, Context.BIND_AUTO_CREATE);
 	}
 	
 	@Override
@@ -181,8 +201,14 @@ public class MainActivity extends Activity {
 		});
 
 
+		progDialogTrackBeingWritten=new ProgressDialog(this);
+		progDialogTrackBeingWritten.setIndeterminate(true);
+		progDialogTrackBeingWritten.setCancelable(false);
+		progDialogTrackBeingWritten.setTitle("Flight log");
+		progDialogTrackBeingWritten.setMessage("Flight log is being written");
+		
 		uiValueUpdateHandler=new Handler(Looper.getMainLooper()) {
-			
+						
 			@Override
 			public void handleMessage(Message msg) {
 				switch(msg.what) {
@@ -192,10 +218,20 @@ public class MainActivity extends Activity {
 				break;
 				
 				case Constants.UI_MESSAGE_TYPE_COMPLEX:
-					PressureBasedInformation pbinfo=(PressureBasedInformation)msg.obj;
-					pressureTV.setText(""+pbinfo.getPressure());
-					heightTV.setText(""+Math.round(pbinfo.getHeight()*100)/100.0f); //this way of rounding is good enough for this purpose
-					climbSinkTV.setText(""+Math.round(pbinfo.getClimbSinkRate()*100)/100.0f);
+					Bundle bundle=msg.getData();
+					pressureTV.setText(""+bundle.getFloat(Constants.pressure, 0.0f));
+					heightTV.setText(""+Math.round(bundle.getDouble(Constants.height, 0.0)*100)/100.0f); //this way of rounding is good enough for this purpose
+					climbSinkTV.setText(""+Math.round(bundle.getDouble(Constants.climbSinkRate, 0.0)*100)/100.0f);
+				break;
+				
+				case Constants.UI_MESSAGE_TYPE_WAIT_FOR_LOGGING:
+					progDialogTrackBeingWritten.show();
+				break;
+				
+				case Constants.UI_MESSAGE_TYPE_STOP_WAITING_FOR_LOGGING:
+					if(progDialogTrackBeingWritten!=null) {
+						progDialogTrackBeingWritten.dismiss();
+					}
 				break;
 				
 				default:
@@ -214,6 +250,7 @@ public class MainActivity extends Activity {
 				if(!broken) {
 					if(varioActive) { //the user wants to deactivate the vario
 						stopUsingVariometerService();
+						Log.d("WARTEN", "after stopUsingVariometerService");
 					}
 					else { //the user wants to activate the vario
 						startUsingVariometerService();
@@ -232,8 +269,6 @@ public class MainActivity extends Activity {
 			
 			@Override
 			public void onServiceConnected(ComponentName name, IBinder service) {
-				VariometerServiceBinder binder=(VariometerServiceBinder)service;
-				binder.setServiceValues(uiValueUpdateHandler, sPrefs.getInt(Constants.lowerBoundPreferenceKey, 10)*-0.1f-0.5f, sPrefs.getInt(Constants.upperBoundPreferenceKey, 10)*0.1f+0.5f);
 				varioBound=true;
 			}
 		};
@@ -290,7 +325,7 @@ public class MainActivity extends Activity {
 		if(!broken) {
 			if(varioActive) {
 				if(!varioBound) {
-					varioBound=bindService(new Intent(MainActivity.this, VariometerService.class), varioServiceConnection, Context.BIND_AUTO_CREATE);
+					bindVariometerService();
 				}
 			}
 			else {
